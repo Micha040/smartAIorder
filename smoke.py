@@ -41,8 +41,7 @@ async def main(args: list[str]) -> None:
                 vorschau = await server.auftrag_anlegen(**daten)
                 show(vorschau)
                 if "--wirklich" in flags and "vorschau_id" in vorschau:
-                    print("
---> lege an ...")
+                    print("\n--> lege an ...")
                     show(await server.auftrag_anlegen(**daten, vorschau_id=vorschau["vorschau_id"]))
             case _:
                 print(__doc__)

@@ -19,10 +19,10 @@ python smoke.py               # zeigt einen echten Auftrag aus XAN100 -> Verbind
 ## Früh testen – vor allem das Anlegen
 
 ```powershell
-python smoke.py kunde 17100001                  # letzter Auftrag eines Kunden (Kundennummer aus smoke.py übernehmen)
+python smoke.py kunde 1000022                  # letzter Auftrag eines Kunden
 python smoke.py dublette 4711                   # Dublettensuche über alle Kunden
-python smoke.py anlegen 17100001 TG11 5         # Vorschau des Payloads (legt nichts an)
-python smoke.py anlegen 17100001 TG11 5 --wirklich   # legt wirklich einen Testauftrag an (Bestellnr. SMOKE-...)
+python smoke.py anlegen 1000022 ZJCG920 5         # Vorschau des Payloads (legt nichts an)
+python smoke.py anlegen 1000022 ZJCG920 5 --wirklich   # legt wirklich einen Testauftrag an (Bestellnr. SMOKE-...)
 pytest                                          # Unit-Tests gegen simuliertes SAP, ohne Netz
 ```
 

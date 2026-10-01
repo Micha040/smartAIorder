@@ -12,14 +12,14 @@ from sap_client import SapClient, SapError
 
 VORLAGE = {
     "SalesOrder": "100",
-    "SalesOrderType": "OR",
+    "SalesOrderType": "TA",
     "SalesOrganization": "1010",
     "DistributionChannel": "10",
     "OrganizationDivision": "00",
-    "SoldToParty": "17100001",
+    "SoldToParty": "1000022",
     "PurchaseOrderByCustomer": "4700",
     "CreationDate": "2026-09-01",
-    "_Item": [{"SalesOrderItem": "10", "Product": "TG11", "RequestedQuantity": 200, "RequestedQuantitySAPUnit": "ST"}],
+    "_Item": [{"SalesOrderItem": "10", "Product": "ZJCG920", "RequestedQuantity": 200, "RequestedQuantitySAPUnit": "ST"}],
 }
 
 
@@ -37,7 +37,7 @@ class FakeSap:
             return httpx.Response(200, headers={"x-csrf-token": f"tok{self.csrf_fetches}", "set-cookie": "sess=1; Path=/"})
         if req.method == "GET" and "PurchaseOrderByCustomer eq" in url:
             return httpx.Response(200, json={"value": self.dubletten})
-        if req.method == "GET" and "SoldToParty eq '17100001'" in url:
+        if req.method == "GET" and "SoldToParty eq '1000022'" in url:
             return httpx.Response(200, json={"value": [VORLAGE]})
         if req.method == "GET" and "SoldToParty eq" in url:
             return httpx.Response(200, json={"value": []})
@@ -66,22 +66,22 @@ def run(coro):
     return asyncio.run(coro)
 
 
-POS = [server.Position(produkt="TG11", menge=200)]
+POS = [server.Position(produkt="ZJCG920", menge=200)]
 
 
 def test_ohne_passende_vorschau_id_wird_nichts_angelegt(fake):
     f = fake()
-    r = run(server.auftrag_anlegen("17100001", "4711", "2099-01-15", POS, vorschau_id="true"))
+    r = run(server.auftrag_anlegen("1000022", "4711", "2099-01-15", POS, vorschau_id="true"))
     assert "vorschau" in r and "achtung" in r and f.posts == []
     # Menge nach der Vorschau geändert -> alte ID passt nicht mehr
-    vid = run(server.auftrag_anlegen("17100001", "4711", "2099-01-15", POS))["vorschau_id"]
-    r = run(server.auftrag_anlegen("17100001", "4711", "2099-01-15", [server.Position(produkt="TG11", menge=999)], vorschau_id=vid))
+    vid = run(server.auftrag_anlegen("1000022", "4711", "2099-01-15", POS))["vorschau_id"]
+    r = run(server.auftrag_anlegen("1000022", "4711", "2099-01-15", [server.Position(produkt="ZJCG920", menge=999)], vorschau_id=vid))
     assert "vorschau" in r and f.posts == []
 
 
 def test_vorschau_legt_nichts_an(fake):
     f = fake()
-    r = run(server.auftrag_anlegen("17100001", "4711", "2099-01-15", POS))
+    r = run(server.auftrag_anlegen("1000022", "4711", "2099-01-15", POS))
     assert r["vorschau"]["SalesOrganization"] == "1010"
     assert r["vorschau"]["RequestedDeliveryDate"] == "2099-01-15"
     assert r["org_daten_von"] == "Auftrag 100"
@@ -96,22 +96,22 @@ def anlegen(*args):
 
 def test_anlegen_mit_bestaetigung(fake):
     f = fake()
-    r = anlegen("17100001", "4711", "2099-01-15", POS)
+    r = anlegen("1000022", "4711", "2099-01-15", POS)
     assert r == {"angelegt": True, "auftrag": "4711", "nettowert": 1234.5, "waehrung": "EUR"}
-    assert f.posts[0]["_Item"] == [{"Product": "TG11", "RequestedQuantity": 200.0}]
-    assert f.posts[0]["SalesOrderType"] == "OR"
+    assert f.posts[0]["_Item"] == [{"Product": "ZJCG920", "RequestedQuantity": 200.0}]
+    assert f.posts[0]["SalesOrderType"] == "TA"
 
 
 def test_dublette_blockiert_anlegen(fake):
     f = fake(dubletten=[{"SalesOrder": "999"}])
-    r = run(server.auftrag_anlegen("17100001", "4711", "KW 44", POS, vorschau_id="egal"))
+    r = run(server.auftrag_anlegen("1000022", "4711", "KW 44", POS, vorschau_id="egal"))
     assert "abgelehnt" in r
     assert f.posts == []
 
 
 def test_csrf_token_wird_erneuert(fake):
     f = fake(csrf_abgelaufen=True)
-    r = anlegen("17100001", "4711", "2099-01-15", POS)
+    r = anlegen("1000022", "4711", "2099-01-15", POS)
     assert r["angelegt"] and f.csrf_fetches == 2
 
 
@@ -173,14 +173,14 @@ def call(name, args):
 
 def test_llm_schickt_nummern_als_zahl(fake):
     fake()
-    fehler, text = call("letzten_auftrag_holen", {"kunde": 17100001})
+    fehler, text = call("letzten_auftrag_holen", {"kunde": 1000022})
     assert not fehler and '"gefunden": true' in text
 
 
 def test_llm_schlampige_positionen(fake):
     f = fake()
     fehler, text = call("auftrag_anlegen", {
-        "kunde": 17100001, "bestellnummer": 4711, "wunschtermin": "KW 44",
+        "kunde": 1000022, "bestellnummer": 4711, "wunschtermin": "KW 44",
         "positionen": '{"product": 4711, "quantity": "1,5"}',  # JSON-String, Einzelobjekt, englische Keys, Komma
     })
     assert not fehler, text
@@ -203,3 +203,13 @@ def test_timeout_wird_lesbar(monkeypatch):
     with pytest.raises(SapError, match="NICHT erneut anlegen"):
         client._csrf = "x"
         run(client.create_order({}))
+
+
+def test_smoke_anlegen_wirklich(fake, capsys):
+    import smoke
+
+    f = fake()
+    run(smoke.main(["anlegen", "1000022", "ZJCG920", "5", "--wirklich"]))
+    out = capsys.readouterr().out
+    assert "vorschau_id" in out and '"angelegt": true' in out
+    assert len(f.posts) == 1
