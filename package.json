@@ -1,0 +1,16 @@
+{
+  "name": "sap-order-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP-Server: Kundenmail -> SAP-Kundenauftrag (Teamtag 2026)",
+  "scripts": {
+    "start": "node src/server.js",
+    "inspect": "npx @modelcontextprotocol/inspector node src/server.js",
+    "smoke": "node src/smoke.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  }
+}

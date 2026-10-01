@@ -1,0 +1,5 @@
+# mcp < 2: FastMCP-API (die kennen Doku, Tutorials und KI-Assistenten). In mcp 2.x heißt sie MCPServer.
+mcp>=1.20,<2
+httpx>=0.27
+python-dotenv>=1.0
+pytest>=8
