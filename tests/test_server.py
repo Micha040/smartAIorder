@@ -187,6 +187,26 @@ def test_llm_schlampige_positionen(fake):
     assert '"RequestedQuantity": 1.5' in text and '"Product": "4711"' in text and f.posts == []
 
 
+def test_llm_erfindet_feldnamen(fake):
+    # Echter Aufruf von gemma4:e4b: Produktnummer steckt in "pos_nummer"
+    fake()
+    fehler, text = call("auftrag_anlegen", {
+        "kunde": "1000022", "bestellnummer": "TEAMTAG-001", "wunschtermin": "KW 50",
+        "positionen": [{"einheit": "ST", "menge": 200, "pos_nummer": "ZJCG920"}],
+    })
+    assert not fehler, text
+    assert '"Product": "ZJCG920"' in text and "KW 50" in text
+
+
+def test_position_ohne_produkt_klare_meldung(fake):
+    fake()
+    fehler, text = call("auftrag_anlegen", {
+        "kunde": "1000022", "bestellnummer": "4711", "wunschtermin": "KW 50",
+        "positionen": [{"menge": 200, "text": "Schrauben"}],
+    })
+    assert fehler and '"produkt"' in text and "menge, text" in text
+
+
 def test_leere_bestellnummer_abgelehnt(fake):
     fake()
     fehler, text = call("dublette_pruefen", {"bestellnummer": "  "})

@@ -8,10 +8,12 @@ WICHTIG bei stdio: niemals print() – stdout gehört dem MCP-Protokoll. Logging
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
 import os
+import re
 import sys
 from datetime import date
 from typing import Annotated, Any
@@ -19,7 +21,7 @@ from typing import Annotated, Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
-from pydantic import AliasChoices, BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from datum import wunschtermin_zu_datum
 from sap_client import SapClient, SapError  # lädt auch die .env
@@ -67,6 +69,23 @@ def sap() -> SapClient:
     return _sap
 
 
+def _protokoll(fn):
+    """Jeden Tool-Aufruf mit Argumenten und Ergebnis/Fehler ins Log schreiben (server.log)."""
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        log.info("Tool %s %s", fn.__name__, kwargs or args)
+        try:
+            res = await fn(*args, **kwargs)
+        except Exception as e:
+            log.warning("Tool %s -> Fehler: %s", fn.__name__, e)
+            raise
+        log.info("Tool %s -> ok", fn.__name__)
+        return res
+
+    return wrapper
+
+
 # --- Tolerante Eingabetypen: lokale Modelle schicken Nummern gern als Zahl, Mengen als "1,5" ---
 
 
@@ -107,6 +126,7 @@ def _positionen(order: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_protokoll
 async def letzten_auftrag_holen(
     kunde: Annotated[Nummer, Field(description="SAP-Kundennummer (SoldToParty)")],
 ) -> dict[str, Any]:
@@ -124,6 +144,7 @@ async def letzten_auftrag_holen(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_protokoll
 async def dublette_pruefen(
     bestellnummer: Annotated[Nummer, Field(max_length=35, description="Bestellnummer des Kunden aus der Mail (PurchaseOrderByCustomer)")],
     kunde: Annotated[Text | None, Field(description="SAP-Kundennummer. Leer lassen = über alle Kunden suchen")] = None,
@@ -136,6 +157,7 @@ async def dublette_pruefen(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@_protokoll
 async def auftrag_anzeigen(
     auftrag: Annotated[Nummer, Field(description="SAP-Kundenauftragsnummer (SalesOrder)")],
 ) -> dict[str, Any]:
@@ -157,17 +179,40 @@ async def auftrag_anzeigen(
     }
 
 
+# Feldnamen, die lokale Modelle für Positionen erfinden. Schlüssel normalisiert: klein, ohne _ - Leerzeichen.
+_POS_ALIASE = {
+    "produkt": ("produkt", "product", "material", "artikel", "produktnummer", "productnumber", "productid",
+                "artikelnummer", "artikelnr", "materialnummer", "materialnr", "sku"),
+    "menge": ("menge", "quantity", "qty", "anzahl", "stueck", "stück", "requestedquantity"),
+    "einheit": ("einheit", "unit", "uom", "mengeneinheit", "requestedquantitysapunit"),
+}
+# Nur wenn sonst kein Produkt erkennbar ist – so nennen kleine Modelle die Produktnummer auch gern (z.B. "pos_nummer").
+_PRODUKT_NOTNAGEL = ("posnummer", "positionsnummer", "nummer", "nr", "id", "item")
+
+
 class Position(BaseModel):
-    produkt: Nummer = Field(
-        validation_alias=AliasChoices("produkt", "product", "Product", "material", "artikel"),
-        description="SAP-Produktnummer (Product)",
-    )
-    menge: Annotated[float, BeforeValidator(_als_zahl)] = Field(
-        gt=0, validation_alias=AliasChoices("menge", "quantity", "Menge", "anzahl"), description="Bestellmenge"
-    )
+    produkt: Nummer = Field(description="SAP-Produktnummer (Product), z.B. 'ZJCG920'")
+    menge: Annotated[float, BeforeValidator(_als_zahl)] = Field(gt=0, description="Bestellmenge")
     einheit: Text | None = Field(
         default=None, description="SAP-Mengeneinheit, z.B. 'ST' oder 'KG'. Leer lassen = SAP ermittelt sie selbst"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _felder_zuordnen(cls, v: Any) -> Any:
+        if not isinstance(v, dict):
+            return v
+        roh = {re.sub(r"[\s_\-]", "", str(k)).lower(): w for k, w in v.items()}
+        pos = {feld: next((roh[a] for a in aliase if roh.get(a) is not None), None) for feld, aliase in _POS_ALIASE.items()}
+        if pos["produkt"] is None:
+            pos["produkt"] = next((roh[a] for a in _PRODUKT_NOTNAGEL if roh.get(a) is not None), None)
+        if pos["produkt"] is None:
+            # Klartext statt "Field required" – damit kann auch ein kleines Modell den Aufruf selbst korrigieren.
+            raise ValueError(
+                f"Position ohne Produktnummer (erhaltene Felder: {', '.join(map(str, v)) or 'keine'}). "
+                'Jede Position braucht "produkt" und "menge", z.B. {"produkt": "ZJCG920", "menge": 200}'
+            )
+        return {k: w for k, w in pos.items() if w is not None}
 
 
 async def _org_daten(kunde: str) -> tuple[dict[str, str], str | None]:
@@ -196,10 +241,11 @@ def _vorschau_id(payload: dict[str, Any]) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+@_protokoll
 async def auftrag_anlegen(
     kunde: Annotated[Nummer, Field(description="SAP-Kundennummer (SoldToParty)")],
     bestellnummer: Annotated[Nummer, Field(max_length=35, description="Bestellnummer des Kunden aus der Mail")],
-    wunschtermin: Annotated[Text, Field(description="Liefertermin wie in der Mail, z.B. 'KW 44', '30.10.2026' oder '2026-10-30'")],
+    wunschtermin: Annotated[Text, Field(description="Liefertermin WÖRTLICH wie in der Mail, z.B. 'KW 44' oder '30.10.2026'. NICHT selbst umrechnen – das macht der Server")],
     positionen: Annotated[list[Position], BeforeValidator(_als_liste), Field(min_length=1, description="Bestellte Positionen")],
     vorschau_id: Annotated[
         Text | None,
@@ -232,6 +278,7 @@ async def auftrag_anlegen(
         vorschau: dict[str, Any] = {
             "vorschau": payload,
             "vorschau_id": vid,
+            "wunschtermin_erkannt": f"{wunschtermin!r} -> {liefertermin:%d.%m.%Y} (KW {liefertermin.isocalendar()[1]})",
             "org_daten_von": f"Auftrag {vorlage_nr}" if vorlage_nr else ".env-Standardwerte",
             "hinweis": "Noch NICHT angelegt. Vorschau dem Nutzer zeigen und um Bestätigung bitten. "
             "Nach Zustimmung auftrag_anlegen mit denselben Daten und dieser vorschau_id aufrufen.",
@@ -253,8 +300,24 @@ async def auftrag_anlegen(
 
 
 if __name__ == "__main__":
+    import atexit
+    from pathlib import Path
+
     sys.stderr.reconfigure(encoding="utf-8")  # Windows: Umlaute in Client-Logs nicht zerschießen
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(message)s")
+    # Zusätzlich in server.log neben dieser Datei – stderr landet bei Odysseus & Co. oft im Nirgendwo.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [pid %(process)d] %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stderr),
+            logging.FileHandler(Path(__file__).with_name("server.log"), encoding="utf-8"),
+        ],
+        force=True,  # FastMCP richtet beim Import schon Logging ein – sonst wäre das hier wirkungslos
+    )
+    log.info("Start: %s %s | SAP_BASE_URL %s | SAP_PASSWORD %s", sys.executable, " ".join(sys.argv),
+             "gesetzt" if os.getenv("SAP_BASE_URL") else "FEHLT", "gesetzt" if os.getenv("SAP_PASSWORD") else "FEHLT")
+    atexit.register(lambda: log.info("Server-Prozess beendet"))
+    sys.excepthook = lambda *exc: log.critical("Absturz", exc_info=exc)
     if "--http" in sys.argv[1:]:
         log.info("sap-order-mcp läuft (Streamable HTTP) auf http://%s:%s/mcp", mcp.settings.host, mcp.settings.port)
         mcp.run(transport="streamable-http")
