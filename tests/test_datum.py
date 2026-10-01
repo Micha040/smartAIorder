@@ -24,6 +24,14 @@ HEUTE = date(2026, 10, 1)  # Donnerstag, KW 40
         ("KW 2", date(2027, 1, 11)),  # schon vorbei -> nächstes Jahr
         ("KW 44/2027", date(2027, 11, 1)),
         ("2026-W44", date(2026, 10, 26)),
+        ("44. KW 2026", date(2026, 10, 26)),  # nicht "KW 20"!
+        ("44. Kalenderwoche 2026", date(2026, 10, 26)),
+        ("Woche 2026-W44", date(2026, 10, 26)),
+        ("KW 44 2027", date(2027, 11, 1)),
+        ("30.10", date(2026, 10, 30)),
+        ("bis 30.10.2026", date(2026, 10, 30)),
+        ("Mo, 26.10.2026", date(2026, 10, 26)),
+        ("2026-10-30T00:00:00", date(2026, 10, 30)),
     ],
 )
 def test_formate(text, erwartet):
@@ -35,7 +43,12 @@ def test_jahreswechsel():
     assert w("KW 1", heute=date(2026, 12, 30)) == date(2027, 1, 4)
 
 
-@pytest.mark.parametrize("text", ["Ende Oktober", "bald", "KW 60", "31.02.2026"])
+@pytest.mark.parametrize("text", ["Ende Oktober", "bald", "KW 60", "31.02.2026", "KW 2026-44", "29.02."])
 def test_ungueltig(text):
     with pytest.raises(ValueError):
         w(text, heute=HEUTE)
+
+
+def test_fehlermeldung_deutsch():
+    with pytest.raises(ValueError, match="Ungültiges Datum"):
+        w("31.02.2026", heute=HEUTE)

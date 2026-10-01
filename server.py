@@ -1,6 +1,6 @@
 """MCP-Server "Bestell-Mail -> Kundenauftrag" (Teamtag 2026).
 
-Start:  python server.py           (stdio – Standard für die meisten MCP-Clients)
+Start:  python server.py           (stdio – Standard, z.B. für Odysseus)
         python server.py --http    (Streamable HTTP auf MCP_HOST:MCP_PORT, Endpoint /mcp – z.B. für Open WebUI)
 
 WICHTIG bei stdio: niemals print() – stdout gehört dem MCP-Protokoll. Logging geht auf stderr.
@@ -8,6 +8,8 @@ WICHTIG bei stdio: niemals print() – stdout gehört dem MCP-Protokoll. Logging
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import sys
@@ -15,13 +17,28 @@ from datetime import date
 from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, BeforeValidator, Field
 
 from datum import wunschtermin_zu_datum
-from sap_client import SapClient, SapError
+from sap_client import SapClient, SapError  # lädt auch die .env
 
 log = logging.getLogger("sap-order-mcp")
+
+_HOST = os.getenv("MCP_HOST", "127.0.0.1")
+# Nur für --http. Lokal gebunden: Schutz gegen DNS-Rebinding (host.docker.internal erlaubt).
+# MCP_HOST=0.0.0.0 (Odysseus/Open WebUI in Docker, WSL oder auf anderem Rechner): kein Host-Check,
+# denn dann kommen Anfragen mit wechselnden Hostnamen/IPs.
+_SECURITY = (
+    TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", "host.docker.internal:*"],
+        allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+    )
+    if _HOST in ("127.0.0.1", "localhost", "::1")
+    else TransportSecuritySettings(enable_dns_rebinding_protection=False)
+)
 
 mcp = FastMCP(
     "sap-order-mcp",
@@ -30,12 +47,13 @@ mcp = FastMCP(
         "1) Kunde, Kundenbestellnummer, Wunschtermin und Positionen aus der Mail extrahieren. "
         "2) Bei 'wie letztes Mal' oder unbekannter Produktnummer letzten_auftrag_holen nutzen. "
         "3) dublette_pruefen aufrufen. "
-        "4) auftrag_anlegen mit bestaetigt=false aufrufen und dem Nutzer die Vorschau zeigen. "
-        "5) Erst nach ausdrücklicher Zustimmung des Nutzers auftrag_anlegen mit bestaetigt=true aufrufen. "
-        "Nichts erfinden: fehlende Angaben beim Nutzer erfragen."
+        "4) auftrag_anlegen OHNE vorschau_id aufrufen und dem Nutzer die Vorschau zeigen. "
+        "5) Erst nach ausdrücklicher Zustimmung des Nutzers auftrag_anlegen mit denselben Daten und der vorschau_id erneut aufrufen. "
+        "Nichts erfinden: fehlende Angaben (z.B. Bestellnummer, Kundennummer) beim Nutzer erfragen."
     ),
-    host=os.getenv("MCP_HOST", "127.0.0.1"),
+    host=_HOST,
     port=int(os.getenv("MCP_PORT", "8000")),
+    transport_security=_SECURITY,
 )
 
 _sap: SapClient | None = None
@@ -49,6 +67,29 @@ def sap() -> SapClient:
     return _sap
 
 
+# --- Tolerante Eingabetypen: lokale Modelle schicken Nummern gern als Zahl, Mengen als "1,5" ---
+
+
+def _als_text(v: Any) -> Any:
+    if v is None or isinstance(v, str):
+        return v.strip() if v else v
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v) if isinstance(v, int) else v
+
+
+def _als_zahl(v: Any) -> Any:
+    return v.strip().replace(",", ".") if isinstance(v, str) else v
+
+
+def _als_liste(v: Any) -> Any:
+    return [v] if isinstance(v, dict) else v
+
+
+Text = Annotated[str, BeforeValidator(_als_text)]
+Nummer = Annotated[str, BeforeValidator(_als_text), Field(min_length=1)]
+
+
 def _positionen(order: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {
@@ -56,7 +97,7 @@ def _positionen(order: dict[str, Any]) -> list[dict[str, Any]]:
             "produkt": i.get("Product"),
             "text": i.get("SalesOrderItemText"),
             "menge": i.get("RequestedQuantity"),
-            "einheit": i.get("RequestedQuantityUnit"),
+            "einheit": i.get("RequestedQuantitySAPUnit"),
         }
         for i in order.get("_Item") or []
     ]
@@ -67,7 +108,7 @@ def _positionen(order: dict[str, Any]) -> list[dict[str, Any]]:
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def letzten_auftrag_holen(
-    kunde: Annotated[str, Field(description="SAP-Kundennummer (SoldToParty)")],
+    kunde: Annotated[Nummer, Field(description="SAP-Kundennummer (SoldToParty)")],
 ) -> dict[str, Any]:
     """Liefert den letzten Kundenauftrag eines Kunden mit Positionen. Nutzen bei 'wie letztes Mal' oder um Produktnummern zu finden."""
     o = await sap().get_last_order(kunde)
@@ -84,8 +125,8 @@ async def letzten_auftrag_holen(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def dublette_pruefen(
-    bestellnummer: Annotated[str, Field(description="Bestellnummer des Kunden aus der Mail (PurchaseOrderByCustomer)")],
-    kunde: Annotated[str | None, Field(description="SAP-Kundennummer. Leer lassen = über alle Kunden suchen")] = None,
+    bestellnummer: Annotated[Nummer, Field(max_length=35, description="Bestellnummer des Kunden aus der Mail (PurchaseOrderByCustomer)")],
+    kunde: Annotated[Text | None, Field(description="SAP-Kundennummer. Leer lassen = über alle Kunden suchen")] = None,
 ) -> dict[str, Any]:
     """Prüft, ob es zu einer Kundenbestellnummer schon einen Auftrag gibt. IMMER vor dem Anlegen aufrufen."""
     hits = await sap().find_orders_by_po(bestellnummer, kunde or None)
@@ -96,7 +137,7 @@ async def dublette_pruefen(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 async def auftrag_anzeigen(
-    auftrag: Annotated[str, Field(description="SAP-Kundenauftragsnummer (SalesOrder)")],
+    auftrag: Annotated[Nummer, Field(description="SAP-Kundenauftragsnummer (SalesOrder)")],
 ) -> dict[str, Any]:
     """Zeigt einen Kundenauftrag mit Kopfdaten und Positionen – z.B. um einen frisch angelegten Auftrag zu kontrollieren."""
     o = await sap().get_order(auftrag)
@@ -117,9 +158,16 @@ async def auftrag_anzeigen(
 
 
 class Position(BaseModel):
-    produkt: str = Field(description="SAP-Produktnummer (Product)")
-    menge: float = Field(gt=0, description="Bestellmenge")
-    einheit: str | None = Field(default=None, description="Mengeneinheit, z.B. 'ST'. Leer = SAP ermittelt sie selbst")
+    produkt: Nummer = Field(
+        validation_alias=AliasChoices("produkt", "product", "Product", "material", "artikel"),
+        description="SAP-Produktnummer (Product)",
+    )
+    menge: Annotated[float, BeforeValidator(_als_zahl)] = Field(
+        gt=0, validation_alias=AliasChoices("menge", "quantity", "Menge", "anzahl"), description="Bestellmenge"
+    )
+    einheit: Text | None = Field(
+        default=None, description="SAP-Mengeneinheit, z.B. 'ST' oder 'KG'. Leer lassen = SAP ermittelt sie selbst"
+    )
 
 
 async def _org_daten(kunde: str) -> tuple[dict[str, str], str | None]:
@@ -142,15 +190,23 @@ async def _org_daten(kunde: str) -> tuple[dict[str, str], str | None]:
     return env, None  # type: ignore[return-value]
 
 
+def _vorschau_id(payload: dict[str, Any]) -> str:
+    """Fingerabdruck des Payloads: Angelegt wird nur genau das, was der Nutzer in der Vorschau gesehen hat."""
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:8]
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
 async def auftrag_anlegen(
-    kunde: Annotated[str, Field(description="SAP-Kundennummer (SoldToParty)")],
-    bestellnummer: Annotated[str, Field(max_length=35, description="Bestellnummer des Kunden aus der Mail")],
-    wunschtermin: Annotated[str, Field(description="Liefertermin wie in der Mail, z.B. 'KW 44', '30.10.2026' oder '2026-10-30'")],
-    positionen: Annotated[list[Position], Field(min_length=1, description="Bestellte Positionen")],
-    bestaetigt: Annotated[bool, Field(description="false = nur Vorschau. true NUR nach ausdrücklicher Zustimmung des Nutzers")] = False,
+    kunde: Annotated[Nummer, Field(description="SAP-Kundennummer (SoldToParty)")],
+    bestellnummer: Annotated[Nummer, Field(max_length=35, description="Bestellnummer des Kunden aus der Mail")],
+    wunschtermin: Annotated[Text, Field(description="Liefertermin wie in der Mail, z.B. 'KW 44', '30.10.2026' oder '2026-10-30'")],
+    positionen: Annotated[list[Position], BeforeValidator(_als_liste), Field(min_length=1, description="Bestellte Positionen")],
+    vorschau_id: Annotated[
+        Text | None,
+        Field(description="Leer lassen = nur Vorschau. Zum Anlegen die vorschau_id aus der Vorschau angeben – NUR nach ausdrücklicher Zustimmung des Nutzers"),
+    ] = None,
 ) -> dict[str, Any]:
-    """Legt einen Kundenauftrag in SAP an. Erst mit bestaetigt=false aufrufen und die Vorschau dem Nutzer zeigen. Nur wenn der Nutzer ausdrücklich zustimmt, erneut mit bestaetigt=true aufrufen."""
+    """Legt einen Kundenauftrag in SAP an – in zwei Schritten: 1) ohne vorschau_id aufrufen -> Vorschau, dem Nutzer zeigen. 2) Erst wenn der Nutzer ausdrücklich zustimmt, mit denselben Daten und der vorschau_id erneut aufrufen."""
     # Harte Regel im Server, unabhängig davon, was das LLM tut:
     dup = await sap().find_orders_by_po(bestellnummer, kunde)
     if dup:
@@ -166,17 +222,22 @@ async def auftrag_anlegen(
         "RequestedDeliveryDate": liefertermin.isoformat(),
         "_Item": [
             {"Product": p.produkt, "RequestedQuantity": p.menge}
-            | ({"RequestedQuantityUnit": p.einheit} if p.einheit else {})
+            | ({"RequestedQuantitySAPUnit": p.einheit} if p.einheit else {})
             for p in positionen
         ],
     }
+    vid = _vorschau_id(payload)
 
-    if not bestaetigt:
+    if vorschau_id != vid:
         vorschau: dict[str, Any] = {
             "vorschau": payload,
+            "vorschau_id": vid,
             "org_daten_von": f"Auftrag {vorlage_nr}" if vorlage_nr else ".env-Standardwerte",
-            "hinweis": "Noch NICHT angelegt. Vorschau dem Nutzer zeigen und um Bestätigung bitten.",
+            "hinweis": "Noch NICHT angelegt. Vorschau dem Nutzer zeigen und um Bestätigung bitten. "
+            "Nach Zustimmung auftrag_anlegen mit denselben Daten und dieser vorschau_id aufrufen.",
         }
+        if vorschau_id:
+            vorschau["achtung"] = "Die Daten weichen von der bestätigten Vorschau ab – bitte diese neue Vorschau bestätigen lassen."
         if liefertermin < date.today():
             vorschau["warnung"] = f"Wunschtermin {liefertermin.isoformat()} liegt in der Vergangenheit."
         return vorschau

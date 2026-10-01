@@ -19,7 +19,7 @@ VORLAGE = {
     "SoldToParty": "17100001",
     "PurchaseOrderByCustomer": "4700",
     "CreationDate": "2026-09-01",
-    "_Item": [{"SalesOrderItem": "10", "Product": "TG11", "RequestedQuantity": 200, "RequestedQuantityUnit": "ST"}],
+    "_Item": [{"SalesOrderItem": "10", "Product": "TG11", "RequestedQuantity": 200, "RequestedQuantitySAPUnit": "ST"}],
 }
 
 
@@ -69,6 +69,16 @@ def run(coro):
 POS = [server.Position(produkt="TG11", menge=200)]
 
 
+def test_ohne_passende_vorschau_id_wird_nichts_angelegt(fake):
+    f = fake()
+    r = run(server.auftrag_anlegen("17100001", "4711", "2099-01-15", POS, vorschau_id="true"))
+    assert "vorschau" in r and "achtung" in r and f.posts == []
+    # Menge nach der Vorschau geändert -> alte ID passt nicht mehr
+    vid = run(server.auftrag_anlegen("17100001", "4711", "2099-01-15", POS))["vorschau_id"]
+    r = run(server.auftrag_anlegen("17100001", "4711", "2099-01-15", [server.Position(produkt="TG11", menge=999)], vorschau_id=vid))
+    assert "vorschau" in r and f.posts == []
+
+
 def test_vorschau_legt_nichts_an(fake):
     f = fake()
     r = run(server.auftrag_anlegen("17100001", "4711", "2099-01-15", POS))
@@ -78,9 +88,15 @@ def test_vorschau_legt_nichts_an(fake):
     assert f.posts == []
 
 
+def anlegen(*args):
+    """Ablauf wie das LLM: Vorschau holen, dann mit vorschau_id bestätigen."""
+    vid = run(server.auftrag_anlegen(*args))["vorschau_id"]
+    return run(server.auftrag_anlegen(*args, vorschau_id=vid))
+
+
 def test_anlegen_mit_bestaetigung(fake):
     f = fake()
-    r = run(server.auftrag_anlegen("17100001", "4711", "2099-01-15", POS, bestaetigt=True))
+    r = anlegen("17100001", "4711", "2099-01-15", POS)
     assert r == {"angelegt": True, "auftrag": "4711", "nettowert": 1234.5, "waehrung": "EUR"}
     assert f.posts[0]["_Item"] == [{"Product": "TG11", "RequestedQuantity": 200.0}]
     assert f.posts[0]["SalesOrderType"] == "OR"
@@ -88,14 +104,14 @@ def test_anlegen_mit_bestaetigung(fake):
 
 def test_dublette_blockiert_anlegen(fake):
     f = fake(dubletten=[{"SalesOrder": "999"}])
-    r = run(server.auftrag_anlegen("17100001", "4711", "KW 44", POS, bestaetigt=True))
+    r = run(server.auftrag_anlegen("17100001", "4711", "KW 44", POS, vorschau_id="egal"))
     assert "abgelehnt" in r
     assert f.posts == []
 
 
 def test_csrf_token_wird_erneuert(fake):
     f = fake(csrf_abgelaufen=True)
-    r = run(server.auftrag_anlegen("17100001", "4711", "2099-01-15", POS, bestaetigt=True))
+    r = anlegen("17100001", "4711", "2099-01-15", POS)
     assert r["angelegt"] and f.csrf_fetches == 2
 
 
@@ -138,3 +154,52 @@ def test_odata_escaping(fake):
 def test_tools_registriert():
     names = {t.name for t in run(server.mcp.list_tools())}
     assert names == {"letzten_auftrag_holen", "dublette_pruefen", "auftrag_anzeigen", "auftrag_anlegen"}
+
+
+# --- Über den echten MCP-Aufrufpfad (Validierung wie bei einem lokalen LLM) ---
+
+
+def call(name, args):
+    """Tool so aufrufen, wie es der MCP-Client tut. Liefert (ist_fehler, text)."""
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    try:
+        res = run(server.mcp.call_tool(name, args))
+    except ToolError as e:
+        return True, str(e)
+    content = res[0] if isinstance(res, tuple) else res
+    return False, content[0].text
+
+
+def test_llm_schickt_nummern_als_zahl(fake):
+    fake()
+    fehler, text = call("letzten_auftrag_holen", {"kunde": 17100001})
+    assert not fehler and '"gefunden": true' in text
+
+
+def test_llm_schlampige_positionen(fake):
+    f = fake()
+    fehler, text = call("auftrag_anlegen", {
+        "kunde": 17100001, "bestellnummer": 4711, "wunschtermin": "KW 44",
+        "positionen": '{"product": 4711, "quantity": "1,5"}',  # JSON-String, Einzelobjekt, englische Keys, Komma
+    })
+    assert not fehler, text
+    assert '"RequestedQuantity": 1.5' in text and '"Product": "4711"' in text and f.posts == []
+
+
+def test_leere_bestellnummer_abgelehnt(fake):
+    fake()
+    fehler, text = call("dublette_pruefen", {"bestellnummer": "  "})
+    assert fehler
+
+
+def test_timeout_wird_lesbar(monkeypatch):
+    def boom(req):
+        raise httpx.ReadTimeout("", request=req)
+
+    client = SapClient("https://sap.example/api/", "u", "p", transport=httpx.MockTransport(boom))
+    with pytest.raises(SapError, match="Zeitüberschreitung"):
+        run(client.find_orders_by_po("4711"))
+    with pytest.raises(SapError, match="NICHT erneut anlegen"):
+        client._csrf = "x"
+        run(client.create_order({}))

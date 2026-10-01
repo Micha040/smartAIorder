@@ -49,13 +49,26 @@ npx @modelcontextprotocol/inspector .venv\Scripts\python.exe server.py
 }
 ```
 
-**HTTP** (z. B. Open WebUI → Einstellungen → Externe Werkzeuge → MCP Streamable HTTP):
+**HTTP** (Transport „Streamable HTTP“, z. B. Odysseus oder Open WebUI ≥ 0.6.31 als Admin unter Admin-Einstellungen → Integrationen):
 
 ```powershell
-python server.py --http       # http://127.0.0.1:8000/mcp
+python server.py --http       # http://127.0.0.1:8000/mcp – nur wenn der Client direkt unter Windows läuft
 ```
 
-Läuft Open WebUI in Docker, `MCP_HOST=0.0.0.0` in `.env` setzen und als URL `http://host.docker.internal:8000/mcp` eintragen.
+Läuft der Client in **Docker, WSL oder auf einem anderen Rechner**, ist `127.0.0.1` dort nicht dieser PC.
+Dann den Server für das Netzwerk öffnen:
+
+```powershell
+$env:MCP_HOST="0.0.0.0"; python server.py --http   # Windows-Firewall-Abfrage erlauben
+```
+
+| Client läuft in | URL |
+|---|---|
+| Docker | `http://host.docker.internal:8000/mcp` |
+| WSL / anderem Rechner | `http://<IP dieses PCs>:8000/mcp` (IP aus `ipconfig`) |
+
+Ob der Client ankommt, zeigt das Server-Log: Dort muss `POST /mcp ... 200` erscheinen.
+Achtung: Mit `0.0.0.0` ist der Server ohne Passwort im Netz erreichbar – nach der Demo beenden.
 
 ## Tools
 

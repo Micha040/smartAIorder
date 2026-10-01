@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -10,10 +11,13 @@ from urllib.parse import quote
 import httpx
 from dotenv import load_dotenv
 
+log = logging.getLogger("sap-order-mcp")
+
 # .env neben dieser Datei laden – nicht aus dem CWD, denn MCP-Clients starten den Server oft woanders.
 load_dotenv(Path(__file__).with_name(".env"))
 
-ITEM_FIELDS = "SalesOrderItem,Product,SalesOrderItemText,RequestedQuantity,RequestedQuantityUnit"
+# V4 kennt kein RequestedQuantityUnit (das ist V2) – hier heißt es RequestedQuantitySAPUnit / RequestedQuantityISOUnit.
+ITEM_FIELDS = "SalesOrderItem,Product,SalesOrderItemText,RequestedQuantity,RequestedQuantitySAPUnit"
 PO_HIT_FIELDS = "SalesOrder,SoldToParty,PurchaseOrderByCustomer,CreationDate,TotalNetAmount,TransactionCurrency"
 
 
@@ -56,6 +60,7 @@ def _raise_for_status(res: httpx.Response, op: str) -> None:
         pass
     if res.status_code == 401:
         msg += " (Benutzer/Passwort in .env prüfen)"
+    log.warning("SAP %s HTTP %s: %s", op, res.status_code, msg)
     raise SapError(f"SAP {op} HTTP {res.status_code}: {msg}")
 
 
@@ -87,15 +92,30 @@ class SapClient:
 
     # --- HTTP-Grundlagen -------------------------------------------------
 
+    async def _request(self, method: str, url: str, **kw: Any) -> httpx.Response:
+        """httpx-Fehler (Timeout, DNS, TLS) in lesbare SapErrors übersetzen – str(Timeout) wäre sonst leer."""
+        try:
+            return await self._http.request(method, url, **kw)
+        except httpx.TimeoutException as e:
+            log.warning("SAP %s %s: Timeout (%s)", method, url, type(e).__name__)
+            if method == "POST":
+                raise SapError(
+                    "Zeitüberschreitung beim Anlegen – Status UNKLAR. Mit dublette_pruefen nachsehen, NICHT erneut anlegen."
+                ) from e
+            raise SapError(f"SAP antwortet nicht (Zeitüberschreitung, {type(e).__name__})") from e
+        except httpx.HTTPError as e:
+            log.warning("SAP %s %s: %r", method, url, e)
+            raise SapError(f"SAP nicht erreichbar ({type(e).__name__}): {e}") from e
+
     async def get(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         url = path + ("?" + _qs(params) if params else "")
-        res = await self._http.get(url)
+        res = await self._request("GET", url)
         _raise_for_status(res, "GET")
         return res.json()
 
     async def _fetch_csrf(self) -> str:
         # Schreibende Requests brauchen ein CSRF-Token. Die Session-Cookies dazu merkt sich der httpx-Client selbst.
-        res = await self._http.get("", headers={"x-csrf-token": "fetch"})
+        res = await self._request("GET", "", headers={"x-csrf-token": "fetch"})
         token = res.headers.get("x-csrf-token")
         if not token or token.lower() == "required":
             _raise_for_status(res, "CSRF-Fetch")
@@ -106,14 +126,14 @@ class SapClient:
         for attempt in (1, 2):
             if not self._csrf:
                 self._csrf = await self._fetch_csrf()
-            res = await self._http.post(path, json=body, headers={"x-csrf-token": self._csrf})
+            res = await self._request("POST", path, json=body, headers={"x-csrf-token": self._csrf})
             # Token abgelaufen -> einmal neu holen und wiederholen
             if res.status_code == 403 and res.headers.get("x-csrf-token", "").lower() == "required" and attempt == 1:
                 self._csrf = None
                 continue
             break
         _raise_for_status(res, "POST")
-        return res.json()
+        return res.json() if res.content else {}
 
     # --- Fachliche Abfragen ----------------------------------------------
 

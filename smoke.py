@@ -32,16 +32,18 @@ async def main(args: list[str]) -> None:
             case ["dublette", po, *rest]:
                 show(await server.dublette_pruefen(po, rest[0] if rest else None))
             case ["anlegen", kunde, produkt, menge, *flags]:
-                po = "SMOKE-" + datetime.now().strftime("%Y%m%d-%H%M%S")
-                show(
-                    await server.auftrag_anlegen(
-                        kunde=kunde,
-                        bestellnummer=po,
-                        wunschtermin=(date.today() + timedelta(days=14)).isoformat(),
-                        positionen=[server.Position(produkt=produkt, menge=float(menge))],
-                        bestaetigt="--wirklich" in flags,
-                    )
+                daten = dict(
+                    kunde=kunde,
+                    bestellnummer="SMOKE-" + datetime.now().strftime("%Y%m%d-%H%M%S"),
+                    wunschtermin=(date.today() + timedelta(days=14)).isoformat(),
+                    positionen=[server.Position(produkt=produkt, menge=float(menge.replace(",", ".")))],
                 )
+                vorschau = await server.auftrag_anlegen(**daten)
+                show(vorschau)
+                if "--wirklich" in flags and "vorschau_id" in vorschau:
+                    print("
+--> lege an ...")
+                    show(await server.auftrag_anlegen(**daten, vorschau_id=vorschau["vorschau_id"]))
             case _:
                 print(__doc__)
                 sys.exit(2)
