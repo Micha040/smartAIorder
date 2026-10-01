@@ -3,7 +3,7 @@
 Bestell-Mail rein, Kundenauftrag in XAN100 raus – mit Dublettencheck und Bestätigungsschritt.
 
 ```
-Kundenmail ─▶ LLM extrahiert Daten ─▶ dublette_pruefen ─▶ auftrag_anlegen (Vorschau) ─▶ Nutzer sagt "ja" ─▶ auftrag_anlegen (bestaetigt) ─▶ SAP
+Kundenmail ─▶ LLM extrahiert Daten ─▶ auftrag_vorschau ─▶ Nutzer sagt "ja" ─▶ auftrag_bestaetigen(vorschau_id) ─▶ SAP
 ```
 
 ## Setup (Windows, PowerShell)
@@ -76,13 +76,19 @@ Achtung: Mit `0.0.0.0` ist der Server ohne Passwort im Netz erreichbar – nach 
 |---|---|
 | `letzten_auftrag_holen(kunde)` | "wie letztes Mal" – Positionen/Produktnummern des letzten Auftrags |
 | `dublette_pruefen(bestellnummer, kunde?)` | Gibt es die Kundenbestellnummer schon? Ohne Kunde: Suche über alle Kunden |
-| `auftrag_anlegen(kunde, bestellnummer, wunschtermin, positionen, bestaetigt)` | `bestaetigt=false` → Vorschau, `true` → Anlage. Prüft Dubletten selbst noch einmal hart |
+| `auftrag_vorschau(kunde, bestellnummer, wunschtermin?, positionen?)` | Schritt 1: Dublettencheck, „wie letztes Mal“ ergänzen, Termin umrechnen → Zusammenfassung + `vorschau_id`. Legt nichts an |
+| `auftrag_bestaetigen(vorschau_id)` | Schritt 2: legt genau die gespeicherte Vorschau an (nur einmal). Prüft Dubletten noch einmal hart |
 | `auftrag_anzeigen(auftrag)` | Angelegten Auftrag kontrollieren (gut für die Demo) |
 
 Designentscheidungen:
 - **Org-Daten** (Auftragsart, Verkaufsorganisation, Vertriebsweg, Sparte) kommen vom letzten Auftrag des Kunden, für Neukunden aus `SAP_DEFAULT_*` in `.env`. Das LLM muss sie nicht raten.
 - **Wunschtermin** rechnet der Server um (`KW 44`, `44. KW`, `30.10.2026`, `30.10.`, `2026-10-30`), nicht das LLM. KW → Montag der Woche.
-- **Dublettenschutz** steckt im Server, nicht nur im Prompt: `auftrag_anlegen` verweigert bei vorhandener Bestellnummer.
+- **Dublettenschutz** steckt im Server, nicht nur im Prompt: Vorschau und Bestätigung verweigern bei vorhandener Bestellnummer.
+- **Kleine lokale Modelle** müssen nur Kunde und Bestellnummer liefern. Fehlen Positionen, Produkt oder Menge, kommen sie vom
+  letzten Auftrag. Erfundene Feldnamen (`pos_nummer`, `materialnummer`, `qty` …) werden zugeordnet. „Stück“-Einheiten
+  (`PCE`, `STK`, `ST` …) gehen nicht an SAP, dann gilt die Verkaufseinheit aus dem Produktstamm.
+- **Bestätigung nur per ID**: Die Vorschau liegt in `vorschauen.json` (24 h gültig). Das Modell muss beim Bestätigen
+  nichts wiederholen und kann die Daten dabei auch nicht mehr verfälschen.
 
 ## Dateien
 
