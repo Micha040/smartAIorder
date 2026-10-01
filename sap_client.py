@@ -17,7 +17,8 @@ log = logging.getLogger("sap-order-mcp")
 load_dotenv(Path(__file__).with_name(".env"))
 
 # V4 kennt kein RequestedQuantityUnit (das ist V2) – hier heißt es RequestedQuantitySAPUnit / RequestedQuantityISOUnit.
-ITEM_FIELDS = "SalesOrderItem,Product,SalesOrderItemText,RequestedQuantity,RequestedQuantitySAPUnit"
+# Angelegt wird mit der ISO-Einheit (z.B. PCE) – die SAP-interne (ST/PC) ist sprachabhängig und scheitert leicht.
+ITEM_FIELDS = "SalesOrderItem,Product,SalesOrderItemText,RequestedQuantity,RequestedQuantityISOUnit"
 PO_HIT_FIELDS = "SalesOrder,SoldToParty,PurchaseOrderByCustomer,CreationDate,TotalNetAmount,TransactionCurrency"
 
 
